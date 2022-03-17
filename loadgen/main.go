@@ -118,4 +118,5 @@ func runTxns(ctx context.Context, client *spanner.Client) {
 			}
 		}(i)
 	}
+	wg.Wait()
 }
