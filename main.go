@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"os"
+	"os/signal"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +34,11 @@ var (
 				CONSTRAINT FK_USER_BAL FOREIGN KEY (UserId) REFERENCES USER_BAL (UserId)
 			) PRIMARY KEY (TransactionId)`,
 	}
+	// TODO: use with index on transaction
+	// Add thread ID in txns
+	// Check writes happening
+	// Write/Read lock
+	// How to take pessimistic lock in spanner
 
 	tableWithInterleaving = []string{
 		`CREATE TABLE USER_BAL (
@@ -44,16 +51,16 @@ var (
 				TransactionId INT64 NOT NULL,
 				Amount FLOAT64 NOT NULL,
 				CreationTime TIMESTAMP NOT NULL
-			) PRIMARY KEY (TransactionId),
+			) PRIMARY KEY (UserId, TransactionId),
   			INTERLEAVE IN PARENT USER_BAL ON DELETE CASCADE`,
 	}
-
 	projectID       string
 	instanceID      string
 	dbName          string
 	numUsers        int64
 	numTxn          int64
 	useInterleaving bool
+	cleanup         bool
 )
 
 func init() {
@@ -63,11 +70,13 @@ func init() {
 	flag.Int64Var(&numUsers, "num_users", 1, "Number of concurrent users to run ledger")
 	flag.Int64Var(&numTxn, "num_txn", 20, "Number of concurrent txns to run ledger")
 	flag.BoolVar(&useInterleaving, "use_interleave", false, "Spanner use interleaving")
-
+	flag.BoolVar(&cleanup, "do_cleanup", false, "Spanner do cleanup")
 }
 
 func main() {
 	flag.Parse()
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
 	ctx := context.Background()
 	dbPath := fmt.Sprintf("projects/%v/instances/%v/databases/%v", projectID, instanceID, dbName)
 	// created the datbase
@@ -88,7 +97,6 @@ func main() {
 	} else {
 		createDatabase(databaseAdmin, tableWithForeignKeys)
 	}
-	defer deleteDatabase(databaseAdmin, projectID, instanceID)
 	insertUsers(ctx, client)
 	for i := int64(1); i <= numUsers; i++ {
 		go func(userID int64, client *spanner.Client) {
@@ -97,7 +105,12 @@ func main() {
 			}
 		}(i, client)
 	}
-	select {}
+	select {
+	case <-c:
+		if cleanup {
+			deleteDatabase(databaseAdmin, projectID, instanceID)
+		}
+	}
 }
 
 func createDatabase(databaseAdmin *database.DatabaseAdminClient, ddlstmts []string) {
@@ -118,6 +131,7 @@ func createDatabase(databaseAdmin *database.DatabaseAdminClient, ddlstmts []stri
 }
 
 func deleteDatabase(databaseAdmin *database.DatabaseAdminClient, projectID, instanceID string) {
+	fmt.Printf("Deleting DB")
 	ctx := context.Background()
 	iter := databaseAdmin.ListDatabases(ctx, &adminpb.ListDatabasesRequest{
 		Parent:   fmt.Sprintf("projects/%v/instances/%v", projectID, instanceID),
